@@ -2,35 +2,150 @@
 
 import argparse
 import socket
+import ssl
 
 DEFAULT_SERVER = "proj5.3700.network"
 DEFAULT_PORT = 443
 
 class Crawler:
-    def __init__(self, args):
-        self.server = args.server
-        self.port = args.port
-        self.username = args.username
-        self.password = args.password
+	def __init__(self, args):
+		self.server = args.server
+		self.port = args.port
+		self.username = args.username
+		self.password = args.password
 
-    def run(self):
-        request = "GET / HTTP/1.0\r\n\r\n"
+	def send(self, request):
+		#print("Request to %s:%d" % (self.server, self.port))
+		#print(request)
+		
+		mysocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+		mysocket = ssl.wrap_socket(mysocket, ssl_version= ssl.PROTOCOL_TLSv1_2)
+		mysocket.connect((self.server, self.port))
+		mysocket.send(request.encode('ascii'))
 
-        print("Request to %s:%d" % (self.server, self.port))
-        print(request)
-        mysocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        mysocket.connect((self.server, self.port))
-        mysocket.send(request.encode('ascii'))
+		data = mysocket.recv(4000)
+		#print("Response:\n%s" % data.decode('ascii'))
 
-        data = mysocket.recv(1000)
-        print("Response:\n%s" % data.decode('ascii'))
+		return data.decode('ascii')
+
+		
+	def run(self):
+
+		# get login page for csrf token
+		request = "GET /accounts/login/ HTTP/1.1\r\nHost: " + self.server  + ":" + str(self.port) + "\r\n\r\n"
+		data = self.send(request)
+		
+		# get csrf middleware token
+		start = data.find('name="csrfmiddlewaretoken" value="') + 34
+		end = data.find('"', start)
+		csrfmiddlewaretoken = data[start:end]
+		# get csrftoken
+		start = data.find('csrftoken=') + 10
+		end = data.find(';', start)
+		csrftoken = data[start:end]
+		# get session id
+		start = data.find('sessionid=') + 10
+		end = data.find(';', start)
+		sessionid = data[start:end]
+
+		cookiemessage = ("Cookie: csrftoken=" + csrftoken + 
+						 "; sessionid=" +  sessionid)
+
+		body = ("username=" + self.username + 
+				"&password=" + self.password + 
+				"&csrfmiddlewaretoken=" + csrfmiddlewaretoken + 
+				"&next=%2Ffakebook%2F")
+
+		request = ("POST /accounts/login/ HTTP/1.1\r\nHost: " + self.server + ":" + str(self.port) +
+				   "\r\nContent-Type:application/x-www-form-urlencoded\r\nContent-Length: " + str(len(body)) +
+				   "\r\n" + cookiemessage +
+				   "\r\n\r\n" + body + "\r\n\r\n")
+		# send login post
+		data = self.send(request)
+
+		# get csrftoken
+		start = data.find('csrftoken=') + 10
+		end = data.find(';', start)
+		csrftoken = data[start:end]
+		# get session id
+		start = data.find('sessionid=') + 10
+		end = data.find(';', start)
+		sessionid = data[start:end]
+
+		cookiemessage = ("Cookie: csrftoken=" + csrftoken + 
+						 "; sessionid=" +  sessionid)
+
+		# get initial redirect
+		start = data.find('Location: ') + 10
+		end = data.find('\r\n', start)
+		next_link = data[start:end]
+		
+
+		links_to_search = [] # links that need to be searched that we have seen
+		links_searched = [] # links that have already been searched
+		flags_found = [] # flags that we found
+
+		links_to_search.append(next_link)
+		while len(flags_found) < 5:
+			
+			request = "GET " + next_link + " HTTP/1.1\r\nHost: " + self.server + ":" + str(self.port) + "\r\n" + cookiemessage + "\r\n\r\n"
+			data = self.send(request)
+			start = data.find("HTTP/1.1 ") + 9
+			end = data.find('\r\n', start)
+			response_code = data[start:end]
+			#print(next_link)
+
+			if "200 OK" in response_code:
+				links_to_search.remove(next_link)
+				links_searched.append(next_link)
+
+				# looking for flag
+				start = data.find(">FLAG: ") + 7
+				if start != 6:
+					end = data.find('<', start)
+					flags_found.append(data[start:end])
+					#print(data[start:end])
+				
+				start = 0
+				while "href" in data[start:]:
+					start = data.find('href="', end) + 6
+					end = data.find('"', start)
+					link = data[start:end]
+					if link[:10] == "/fakebook/" and link not in links_searched and link not in links_to_search:
+						links_to_search.append(link)
+				
+				next_link = links_to_search[0]
+			elif "302 Found" in response_code:
+				links_to_search.remove(next_link)
+				links_searched.append(next_link)
+				start = data.find('Location: ') + 10
+				end = data.find('\n', start)
+				link = data[start:end]
+				if link in links_searched or link in links_to_search:
+					next_link = links_to_search[0]
+				else:
+					links_to_search.append(link)
+					next_link = link
+			elif "403 Forbidden" in response_code or "404 Not Found" in response_code:
+				links_to_search.remove(next_link)
+				links_searched.append(next_link)
+				next_link = links_to_search[0]
+			elif "503" in response_code:
+				continue
+			else:
+				print("RESPONSE CODE WAS NOT NORMALLY")
+				print(response_code)
+				break
+
+		for flag in flags_found:
+			print(flag)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='crawl Fakebook')
-    parser.add_argument('-s', dest="server", type=str, default=DEFAULT_SERVER, help="The server to crawl")
-    parser.add_argument('-p', dest="port", type=int, default=DEFAULT_PORT, help="The port to use")
-    parser.add_argument('username', type=str, help="The username to use")
-    parser.add_argument('password', type=str, help="The password to use")
-    args = parser.parse_args()
-    sender = Crawler(args)
-    sender.run()
+	parser = argparse.ArgumentParser(description='crawl Fakebook')
+	parser.add_argument('-s', dest="server", type=str, default=DEFAULT_SERVER, help="The server to crawl")
+	parser.add_argument('-p', dest="port", type=int, default=DEFAULT_PORT, help="The port to use")
+	parser.add_argument('username', type=str, help="The username to use")
+	parser.add_argument('password', type=str, help="The password to use")
+	args = parser.parse_args()
+	sender = Crawler(args)
+	sender.run()
